@@ -62,7 +62,7 @@ INT32_MAX = np.iinfo(np.int32).max - 1
 
 FLOAT32_EPS = np.finfo(np.float32).eps
 
-EMPTY_GRAPH = make_heap(1, 1)
+EMPTY_GRAPH = make_heap(1, 1, 1)
 
 
 def is_c_contiguous(array_like):
@@ -123,6 +123,8 @@ def init_rp_tree(data, dist, current_graph, leaf_array):
                     d,
                     q,
                     np.uint8(1),
+                    current_graph[3][p],
+                    current_graph[4][p],
                 )
                 checked_flagged_heap_push(
                     current_graph[1][q],
@@ -131,6 +133,8 @@ def init_rp_tree(data, dist, current_graph, leaf_array):
                     d,
                     p,
                     np.uint8(1),
+                    current_graph[3][q],
+                    current_graph[4][q],
                 )
 
 
@@ -146,7 +150,7 @@ def init_random(n_neighbors, data, heap, dist, rng_state):
                 idx = np.abs(tau_rand_int(rng_state)) % data.shape[0]
                 d = dist(data[idx], data[i])
                 checked_flagged_heap_push(
-                    heap[1][i], heap[0][i], heap[2][i], d, idx, np.uint8(1)
+                    heap[1][i], heap[0][i], heap[2][i], d, idx, np.uint8(1), heap[3][i], heap[4][i]
                 )
 
     return
@@ -158,7 +162,7 @@ def init_from_neighbor_graph(heap, indices, distances):
         for k in range(indices.shape[1]):
             q = indices[p, k]
             d = distances[p, k]
-            checked_flagged_heap_push(heap[1][p], heap[0][p], heap[2][p], d, q, 0)
+            checked_flagged_heap_push(heap[1][p], heap[0][p], heap[2][p], d, q, 0, heap[3][p], heap[4][p])
 
     return
 
@@ -235,6 +239,7 @@ def nn_descent_internal_low_memory_parallel(
     current_graph,
     data,
     n_neighbors,
+    n_backup,
     rng_state,
     max_candidates=50,
     dist=pynnd_dist.euclidean,
@@ -277,6 +282,7 @@ def nn_descent_internal_high_memory_parallel(
     current_graph,
     data,
     n_neighbors,
+    n_backup,
     rng_state,
     max_candidates=50,
     dist=pynnd_dist.euclidean,
@@ -327,6 +333,7 @@ def nn_descent_internal_high_memory_parallel(
 def nn_descent(
     data,
     n_neighbors,
+    n_backup,
     rng_state,
     max_candidates=50,
     dist=pynnd_dist.euclidean,
@@ -340,7 +347,7 @@ def nn_descent(
 ):
 
     if init_graph[0].shape[0] == 1:  # EMPTY_GRAPH
-        current_graph = make_heap(data.shape[0], n_neighbors)
+        current_graph = make_heap(data.shape[0], n_neighbors, n_backup)
 
         if rp_tree_init:
             init_rp_tree(data, dist, current_graph, leaf_array)
@@ -359,6 +366,7 @@ def nn_descent(
             current_graph,
             data,
             n_neighbors,
+            n_backup,
             rng_state,
             max_candidates=max_candidates,
             dist=dist,
@@ -371,6 +379,7 @@ def nn_descent(
             current_graph,
             data,
             n_neighbors,
+            n_backup,
             rng_state,
             max_candidates=max_candidates,
             dist=dist,
@@ -379,7 +388,7 @@ def nn_descent(
             verbose=verbose,
         )
 
-    return deheap_sort(current_graph[0], current_graph[1])
+    return deheap_sort(current_graph[0], current_graph[1]) + (current_graph[3], current_graph[4])
 
 
 @numba.njit(parallel=True)
@@ -562,6 +571,9 @@ class NNDescent:
         will result in more accurate search results at the cost of
         computation time.
 
+    n_backup: int (optional, default=30)
+        The number of non-nearest-neighbor backup datapoints to keep around.
+
     n_trees: int (optional, default=None)
         This implementation uses random projection forests for initializing the index
         build process. This parameter controls the number of trees in that forest. A
@@ -668,6 +680,7 @@ class NNDescent:
         metric="euclidean",
         metric_kwds=None,
         n_neighbors=30,
+        n_backup=100,
         n_trees=None,
         leaf_size=None,
         pruning_degree_multiplier=1.5,
@@ -696,6 +709,7 @@ class NNDescent:
         self.n_trees = n_trees
         self.n_trees_after_update = max(1, int(np.round(self.n_trees / 3)))
         self.n_neighbors = n_neighbors
+        self.n_backup = n_backup
         self.metric = metric
         self.metric_kwds = metric_kwds
         self.leaf_size = leaf_size
@@ -861,7 +875,7 @@ class NNDescent:
             else:
                 if init_graph.shape[0] != self._raw_data.shape[0]:
                     raise ValueError("Init graph size does not match dataset size!")
-                _init_graph = make_heap(init_graph.shape[0], self.n_neighbors)
+                _init_graph = make_heap(init_graph.shape[0], self.n_neighbors, self.n_backup)
                 _init_graph = sparse_initalize_heap_from_graph_indices(
                     _init_graph,
                     init_graph,
@@ -879,6 +893,7 @@ class NNDescent:
                 self._raw_data.indptr,
                 self._raw_data.data,
                 self.n_neighbors,
+                self.n_backup,
                 self.rng_state,
                 max_candidates=effective_max_candidates,
                 dist=self._distance_func,
@@ -900,7 +915,7 @@ class NNDescent:
             else:
                 if init_graph.shape[0] != self._raw_data.shape[0]:
                     raise ValueError("Init graph size does not match dataset size!")
-                _init_graph = make_heap(init_graph.shape[0], self.n_neighbors)
+                _init_graph = make_heap(init_graph.shape[0], self.n_neighbors, self.n_backup)
                 if init_dist is None:
                     _init_graph = initalize_heap_from_graph_indices(
                         _init_graph, init_graph, data, self._distance_func
@@ -920,6 +935,7 @@ class NNDescent:
             self._neighbor_graph = nn_descent(
                 self._raw_data,
                 self.n_neighbors,
+                self.n_backup,
                 self.rng_state,
                 effective_max_candidates,
                 self._distance_func,
@@ -1238,6 +1254,7 @@ class NNDescent:
         indices = self._search_graph.indices
         dist = self._distance_func
         n_neighbors = self.n_neighbors
+        n_backup = self.n_backup
         parallel_search = self.parallel_batch_queries
 
         @numba.njit(
@@ -1288,6 +1305,8 @@ class NNDescent:
 
                 heap_priorities = result[1][i]
                 heap_indices = result[0][i]
+                backup_heap_priorities = result[4][i]
+                backup_heap_indices = result[3][i]
                 seed_set = [(np.float32(np.inf), np.int32(-1)) for j in range(0)]
                 # heapq.heapify(seed_set)
 
@@ -1302,7 +1321,7 @@ class NNDescent:
                     candidate = candidate_indices[j]
                     d = np.float32(dist(data[candidate], current_query))
                     # indices are guaranteed different
-                    simple_heap_push(heap_priorities, heap_indices, d, candidate)
+                    simple_heap_push(heap_priorities, heap_indices, d, candidate, backup_heap_indices, backup_heap_priorities)
                     heapq.heappush(seed_set, (d, candidate))
                     mark_visited(visited_nodes, candidate)
 
@@ -1314,7 +1333,7 @@ class NNDescent:
                         if has_been_visited(visited_nodes, candidate) == 0:
                             d = np.float32(dist(data[candidate], current_query))
                             simple_heap_push(
-                                heap_priorities, heap_indices, d, candidate
+                                heap_priorities, heap_indices, d, candidate, backup_heap_indices, backup_heap_priorities
                             )
                             heapq.heappush(seed_set, (d, candidate))
                             mark_visited(visited_nodes, candidate)
@@ -1338,7 +1357,7 @@ class NNDescent:
 
                             if d < distance_bound:
                                 simple_heap_push(
-                                    heap_priorities, heap_indices, d, candidate
+                                    heap_priorities, heap_indices, d, candidate, backup_heap_indices, backup_heap_priorities
                                 )
                                 heapq.heappush(seed_set, (d, candidate))
                                 # Update bound
@@ -1424,6 +1443,7 @@ class NNDescent:
         indices = self._search_graph.indices
         dist = self._distance_func
         n_neighbors = self.n_neighbors
+        n_backup = self.n_backup
         parallel_search = self.parallel_batch_queries
 
         @numba.njit(
@@ -1475,6 +1495,8 @@ class NNDescent:
 
                 heap_priorities = result[1][i]
                 heap_indices = result[0][i]
+                backup_heap_priorities = result[4][i]
+                backup_heap_indices = result[3][i]
                 seed_set = [(np.float32(np.inf), np.int32(-1)) for j in range(0)]
                 heapq.heapify(seed_set)
 
@@ -1503,7 +1525,7 @@ class NNDescent:
                         )
                     )
                     # indices are guaranteed different
-                    simple_heap_push(heap_priorities, heap_indices, d, candidate)
+                    simple_heap_push(heap_priorities, heap_indices, d, candidate, backup_heap_indices, backup_heap_priorities)
                     heapq.heappush(seed_set, (d, candidate))
                     mark_visited(visited_nodes, candidate)
 
@@ -1530,7 +1552,7 @@ class NNDescent:
                             )
 
                             simple_heap_push(
-                                heap_priorities, heap_indices, d, candidate
+                                heap_priorities, heap_indices, d, candidate, backup_heap_priorities, backup_heap_indices
                             )
                             heapq.heappush(seed_set, (d, candidate))
                             mark_visited(visited_nodes, candidate)
@@ -1568,7 +1590,7 @@ class NNDescent:
 
                             if d < distance_bound:
                                 simple_heap_push(
-                                    heap_priorities, heap_indices, d, candidate
+                                    heap_priorities, heap_indices, d, candidate, backup_heap_indices, backup_heap_priorities
                                 )
                                 heapq.heappush(seed_set, (d, candidate))
                                 # Update bound
@@ -1612,9 +1634,12 @@ class NNDescent:
             result = (
                 self._neighbor_graph[0].copy(),
                 self._distance_correction(self._neighbor_graph[1]),
+                self._neighbor_graph[2].copy(),
+                self._distance_correction(self._neighbor_graph[3])
             )
         else:
-            result = (self._neighbor_graph[0].copy(), self._neighbor_graph[1].copy())
+            result = (self._neighbor_graph[0].copy(), self._neighbor_graph[1].copy(),
+                      self._neighbor_graph[2].copy(), self._neighbor_graph[3].copy())
 
         return result
 
@@ -1840,7 +1865,7 @@ class NNDescent:
                 self._angular_trees,
             )
             leaf_array = rptree_leaf_array(self._rp_forest)
-            current_graph = make_heap(self._raw_data.shape[0], self.n_neighbors)
+            current_graph = make_heap(self._raw_data.shape[0], self.n_neighbors, self.n_backup)
             init_from_neighbor_graph(
                 current_graph, self._neighbor_graph[0], self._neighbor_graph[1]
             )
@@ -1854,6 +1879,7 @@ class NNDescent:
             self._neighbor_graph = nn_descent(
                 self._raw_data,
                 self.n_neighbors,
+                self.n_backup,
                 self.rng_state,
                 effective_max_candidates,
                 self._distance_func,

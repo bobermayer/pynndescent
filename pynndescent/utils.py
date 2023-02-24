@@ -163,13 +163,13 @@ def Heap_get_indices(self):
     return self.indices
 
 
-structref.define_proxy(Heap, HeapType, ["indices", "distances", "flags"])
+structref.define_proxy(Heap, HeapType, ["indices", "distances", "flags","backup_indices","backup_distances"])
 
 # Heap = namedtuple("Heap", ("indices", "distances", "flags"))
 
 
 @numba.njit(cache=True)
-def make_heap(n_points, size):
+def make_heap(n_points, size, nbackup):
     """Constructor for the numba enabled heap objects. The heaps are used
     for approximate nearest neighbor search, maintaining a list of potential
     neighbors sorted by their distance. We also flag if potential neighbors
@@ -177,7 +177,8 @@ def make_heap(n_points, size):
     a single ndarray; the first axis determines whether we are looking at the
     array of candidate graph_indices, the array of distances, or the flag array for
     whether elements are new or not. Each of these arrays are of shape
-    (``n_points``, ``size``)
+    (``n_points``, ``size``). 
+    we also keep backup arrays of indices and distances for points that not nearest neighbors
 
     Parameters
     ----------
@@ -187,6 +188,9 @@ def make_heap(n_points, size):
     size: int
         The number of items to keep on the heap for each graph_data point.
 
+    nbackup: int
+        The number of backup items to keep on the heap for each graph_data point.
+
     Returns
     -------
     heap: An ndarray suitable for passing to other numba enabled heap functions.
@@ -194,7 +198,9 @@ def make_heap(n_points, size):
     indices = np.full((int(n_points), int(size)), -1, dtype=np.int32)
     distances = np.full((int(n_points), int(size)), np.infty, dtype=np.float32)
     flags = np.zeros((int(n_points), int(size)), dtype=np.uint8)
-    result = (indices, distances, flags)
+    backup_indices = np.full((int(n_points), int(nbackup)), -1, dtype=np.int32)
+    backup_distances = np.full((int(n_points), int(nbackup)), np.infty, dtype=np.float32)
+    result = (indices, distances, flags, backup_indices, backup_distances)
 
     return result
 
@@ -319,6 +325,9 @@ def new_build_candidates(current_graph, max_candidates, rng_state, n_threads):
     current_indices = current_graph[0]
     current_flags = current_graph[2]
 
+    #backup_indices = current_graph[3]
+    #backup_distances = current_graph[4]
+
     n_vertices = current_indices.shape[0]
     n_neighbors = current_indices.shape[1]
 
@@ -398,9 +407,28 @@ def mark_visited(table, candidate):
     table[loc] |= mask
     return
 
+@numba.njit(
+    "i4(i4,f4,i4[::1],f4[::1])",
+    fastmath=True,
+    locals={
+        'k': numba.types.uint16
+    },
+    cache=True)
+def heap_push_backup(n, d, backup_indices, backup_distances):
+
+    # insert value at first position that isn't -1
+    k = 0
+    while k < backup_indices.shape[0]:
+        if backup_indices[k] == -1:
+            backup_indices[k] = n
+            backup_distances[k] = d
+            return 1
+        k = k + 1
+        
+    return 0
 
 @numba.njit(
-    "i4(f4[::1],i4[::1],f4,i4)",
+    "i4(f4[::1],i4[::1],f4,i4,i4[::1],f4[::1])",
     fastmath=True,
     locals={
         "size": numba.types.intp,
@@ -411,7 +439,7 @@ def mark_visited(table, candidate):
     },
     cache=True,
 )
-def simple_heap_push(priorities, indices, p, n):
+def simple_heap_push(priorities, indices, p, n, backup_indices, backup_priorities):
     if p >= priorities[0]:
         return 0
 
@@ -449,6 +477,8 @@ def simple_heap_push(priorities, indices, p, n):
         indices[i] = indices[i_swap]
 
         i = i_swap
+
+    heap_push_backup(indices[i], priorities[i], backup_indices, backup_priorities)
 
     priorities[i] = p
     indices[i] = n
@@ -512,6 +542,8 @@ def checked_heap_push(priorities, indices, p, n):
 
         i = i_swap
 
+    #heap_push_backup(indices[i], priorities[i], backup_indices, backup_priorities)
+
     priorities[i] = p
     indices[i] = n
 
@@ -519,7 +551,7 @@ def checked_heap_push(priorities, indices, p, n):
 
 
 @numba.njit(
-    "i4(f4[::1],i4[::1],u1[::1],f4,i4,u1)",
+    "i4(f4[::1],i4[::1],u1[::1],f4,i4,u1,i4[::1],f4[::1])",
     fastmath=True,
     locals={
         "size": numba.types.intp,
@@ -530,7 +562,7 @@ def checked_heap_push(priorities, indices, p, n):
     },
     cache=True,
 )
-def checked_flagged_heap_push(priorities, indices, flags, p, n, f):
+def checked_flagged_heap_push(priorities, indices, flags, p, n, f, backup_indices, backup_priorities):
     if p >= priorities[0]:
         return 0
 
@@ -576,6 +608,8 @@ def checked_flagged_heap_push(priorities, indices, flags, p, n, f):
 
         i = i_swap
 
+    heap_push_backup(indices[i], priorities[i], backup_indices, backup_priorities)
+
     priorities[i] = p
     indices[i] = n
     flags[i] = f
@@ -602,6 +636,8 @@ def apply_graph_updates_low_memory(current_graph, updates, n_threads):
     priorities = current_graph[1]
     indices = current_graph[0]
     flags = current_graph[2]
+    backup_indices = current_graph[3]
+    backup_distances = current_graph[4]
     # n_threads = numba.get_num_threads()
 
     for n in numba.prange(n_threads):
@@ -614,13 +650,13 @@ def apply_graph_updates_low_memory(current_graph, updates, n_threads):
 
                 if p % n_threads == n:
                     added = checked_flagged_heap_push(
-                        priorities[p], indices[p], flags[p], d, q, 1
+                        priorities[p], indices[p], flags[p], d, q, 1, backup_indices[p], backup_distances[p]
                     )
                     n_changes += added
 
                 if q % n_threads == n:
                     added = checked_flagged_heap_push(
-                        priorities[q], indices[q], flags[q], d, p, 1
+                        priorities[q], indices[q], flags[q], d, p, 1, backup_indices[q], backup_distances[q]
                     )
                     n_changes += added
 
@@ -651,6 +687,8 @@ def apply_graph_updates_high_memory(current_graph, updates, in_graph):
                     d,
                     q,
                     1,
+                    current_graph[3][p],
+                    current_graph[4][p],
                 )
 
                 if added > 0:
@@ -667,6 +705,8 @@ def apply_graph_updates_high_memory(current_graph, updates, in_graph):
                     d,
                     q,
                     1,
+                    current_graph[3][p],
+                    current_graph[4][p]
                 )
 
                 if added > 0:
@@ -684,7 +724,7 @@ def initalize_heap_from_graph_indices(heap, graph_indices, data, metric):
             j = graph_indices[i, idx]
             if j >= 0:
                 d = metric(data[i], data[j])
-                checked_flagged_heap_push(heap[1][i], heap[0][i], heap[2][i], d, j, 1)
+                checked_flagged_heap_push(heap[1][i], heap[0][i], heap[2][i], d, j, 1, heap[3][i], heap[4][i])
 
     return heap
 
@@ -698,7 +738,7 @@ def initalize_heap_from_graph_indices_and_distances(
             j = graph_indices[i, idx]
             if j >= 0:
                 d = graph_distances[i, idx]
-                checked_flagged_heap_push(heap[1][i], heap[0][i], heap[2][i], d, j, 1)
+                checked_flagged_heap_push(heap[1][i], heap[0][i], heap[2][i], d, j, 1, heap[3][i], heap[4][i])
 
     return heap
 
@@ -716,7 +756,7 @@ def sparse_initalize_heap_from_graph_indices(
             ind2 = data_indices[data_indptr[j] : data_indptr[j + 1]]
             data2 = data_vals[data_indptr[j] : data_indptr[j + 1]]
             d = metric(ind1, data1, ind2, data2)
-            checked_flagged_heap_push(heap[1][i], heap[0][i], heap[2][i], d, j, 1)
+            checked_flagged_heap_push(heap[1][i], heap[0][i], heap[2][i], d, j, 1, heap[3][i], heap[4][i])
 
     return heap
 

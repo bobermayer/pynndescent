@@ -21,7 +21,7 @@ from pynndescent.sparse import sparse_euclidean
 
 locale.setlocale(locale.LC_NUMERIC, "C")
 
-EMPTY_GRAPH = make_heap(1, 1)
+EMPTY_GRAPH = make_heap(1, 1, 1)
 
 
 @numba.njit(parallel=True, cache=False)
@@ -85,6 +85,8 @@ def init_rp_tree(inds, indptr, data, dist, current_graph, leaf_array):
                     d,
                     q,
                     np.uint8(1),
+                    current_graph[3][p],
+                    current_graph[4][p],
                 )
                 checked_flagged_heap_push(
                     current_graph[1][q],
@@ -93,6 +95,8 @@ def init_rp_tree(inds, indptr, data, dist, current_graph, leaf_array):
                     d,
                     p,
                     np.uint8(1),
+                    current_graph[3][q],
+                    current_graph[4][q],
                 )
 
 
@@ -116,7 +120,7 @@ def init_random(n_neighbors, inds, indptr, data, heap, dist, rng_state):
                 d = dist(from_inds, from_data, to_inds, to_data)
 
                 checked_flagged_heap_push(
-                    heap[1][i], heap[0][i], heap[2][i], d, idx, np.uint8(1)
+                    heap[1][i], heap[0][i], heap[2][i], d, idx, np.uint8(1), heap[3][i], heap[4][i]
                 )
 
     return
@@ -288,6 +292,7 @@ def nn_descent(
     indptr,
     data,
     n_neighbors,
+    n_backup,
     rng_state,
     max_candidates=50,
     dist=sparse_euclidean,
@@ -303,7 +308,7 @@ def nn_descent(
     n_samples = indptr.shape[0] - 1
 
     if init_graph[0].shape[0] == 1:  # EMPTY_GRAPH
-        current_graph = make_heap(n_samples, n_neighbors)
+        current_graph = make_heap(n_samples, n_neighbors, n_backup)
 
         if rp_tree_init:
             init_rp_tree(inds, indptr, data, dist, current_graph, leaf_array)
