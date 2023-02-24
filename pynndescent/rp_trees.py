@@ -549,7 +549,7 @@ def sparse_euclidean_random_projection_split(inds, indptr, data, indices, rng_st
 
 @numba.njit(
     nogil=True,
-    cache=True,
+    cache=False,
     locals={"left_node_num": numba.types.int32, "right_node_num": numba.types.int32},
 )
 def make_euclidean_tree(
@@ -614,7 +614,7 @@ def make_euclidean_tree(
 
 @numba.njit(
     nogil=True,
-    cache=True,
+    cache=False,
     locals={
         "children": numba.types.ListType(children_type),
         "left_node_num": numba.types.int32,
@@ -683,7 +683,7 @@ def make_angular_tree(
 
 @numba.njit(
     nogil=True,
-    cache=True,
+    cache=False,
     locals={"left_node_num": numba.types.int32, "right_node_num": numba.types.int32},
 )
 def make_sparse_euclidean_tree(
@@ -756,7 +756,7 @@ def make_sparse_euclidean_tree(
 
 @numba.njit(
     nogil=True,
-    cache=True,
+    cache=False,
     locals={"left_node_num": numba.types.int32, "right_node_num": numba.types.int32},
 )
 def make_sparse_angular_tree(
@@ -825,7 +825,7 @@ def make_sparse_angular_tree(
         point_indices.append(indices)
 
 
-@numba.njit(nogil=True, cache=True)
+@numba.njit(nogil=True, cache=False)
 def make_dense_tree(data, rng_state, leaf_size=30, angular=False):
     indices = np.arange(data.shape[0]).astype(np.int32)
 
@@ -861,7 +861,7 @@ def make_dense_tree(data, rng_state, leaf_size=30, angular=False):
     return result
 
 
-@numba.njit(nogil=True, cache=True)
+@numba.njit(nogil=True, cache=False)
 def make_sparse_tree(inds, indptr, spdata, rng_state, leaf_size=30, angular=False):
     indices = np.arange(indptr.shape[0] - 1).astype(np.int32)
 
